@@ -3,80 +3,106 @@ package runner
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/rliebz/tusk/ui"
 	yaml "gopkg.in/yaml.v2"
+	"gotest.tools/v3/assert"
 )
 
 func TestTask_UnmarshalYAML(t *testing.T) {
-	y := []byte(`
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	testdata := func(filename string) string {
+		return filepath.Join(wd, "testdata", filename)
+	}
+
+	tests := []struct {
+		name    string
+		input   string
+		want    Task
+		wantErr string
+	}{
+		{
+			name: "options and args",
+			input: `
 options: { one: {}, two: {} }
 args: { three: {}, four: {} }
-`)
-	task := Task{}
-
-	if err := yaml.UnmarshalStrict(y, &task); err != nil {
-		t.Fatalf(
-			`yaml.UnmarshalStrict("%s", %+v): unexpected error: %s`,
-			string(y), task, err,
-		)
-	}
-
-	for i, expected := range []string{"one", "two"} {
-		actual := task.Options[i].Name
-		if expected != actual {
-			t.Errorf(
-				`yaml.UnmarshalStrict("%s", %+v): expected option name: %s, actual: %s`,
-				string(y), task, expected, actual,
-			)
-		}
-	}
-
-	for _, expected := range []string{"three", "four"} {
-		arg, ok := task.Args.Lookup(expected)
-		if !ok {
-			t.Errorf(
-				`yaml.UnmarshalStrict(%q, %+v): did not find arg %q`,
-				string(y), task, expected,
-			)
-			continue
-		}
-
-		actual := arg.Name
-		if expected != actual {
-			t.Errorf(
-				`yaml.UnmarshalStrict(%q, %+v): expected arg name: %s, actual: %s`,
-				string(y), task, expected, actual,
-			)
-		}
-	}
-}
-
-func TestTask_UnmarshalYAML_invalid(t *testing.T) {
-	y := []byte(`[invalid]`)
-	task := Task{}
-
-	if err := yaml.UnmarshalStrict(y, &task); err == nil {
-		t.Fatalf(
-			"yaml.UnmarshalStrict(%s, ...): expected error, actual nil", string(y),
-		)
-	}
-}
-
-func TestTask_UnmarshalYAML_option_and_arg_share_name(t *testing.T) {
-	y := []byte(`
+`,
+			want: Task{
+				Options: Options{
+					{Name: "one"},
+					{Name: "two"},
+				},
+				Args: Args{
+					{Name: "three"},
+					{Name: "four"},
+				},
+			},
+		},
+		{
+			name:  "include",
+			input: fmt.Sprintf(`{include: %q}`, testdata("included.yml")),
+			want: Task{
+				Usage: "A valid example of an included task",
+				RunList: RunList{{Command: CommandList{{
+					Exec:  `echo "We're in!"`,
+					Print: `echo "We're in!"`,
+				}}}},
+			},
+		},
+		{
+			name:    "include-extra",
+			input:   fmt.Sprintf(`{include: %q, usage: "This is incorrect"}`, testdata("included.yml")),
+			wantErr: `tasks using "include" may not specify other fields`,
+		},
+		{
+			name:    "include invalid",
+			input:   fmt.Sprintf(`{include: %q}`, testdata("included-invalid.yml")),
+			wantErr: "decoding included file",
+		},
+		{
+			name:    "include missing",
+			input:   fmt.Sprintf(`{include: %q}`, testdata("not-a-real-file.yml")),
+			wantErr: "opening included file",
+		},
+		{
+			name:    "invalid",
+			input:   "[invalid]",
+			wantErr: "yaml: unmarshal errors",
+		},
+		{
+			name: "option and arg share name",
+			input: `
 options: { foo: {} }
 args: { foo: {} }
-`)
-	task := Task{}
+`,
+			wantErr: `argument and option "foo" must have unique names within a task`,
+		},
+	}
 
-	if err := yaml.UnmarshalStrict(y, &task); err == nil {
-		t.Fatalf(
-			"yaml.UnmarshalStrict(%s, ...): expected error, actual nil", string(y),
-		)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got Task
+			err := yaml.UnmarshalStrict([]byte(tt.input), &got)
+			if tt.wantErr != "" {
+				assert.ErrorContains(t, err, tt.wantErr)
+			} else {
+				assert.NilError(t, err)
+			}
+
+			if diff := cmp.Diff(tt.want, got, cmp.AllowUnexported(Option{})); diff != "" {
+				t.Errorf("parsed task differs from expected:\n%s", diff)
+			}
+		})
 	}
 }
 
